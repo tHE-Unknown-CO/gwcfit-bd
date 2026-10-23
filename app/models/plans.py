@@ -13,6 +13,7 @@ class MembershipPlan(TenantMixin, EnterpriseMixin, Base):
 
     name: Mapped[str] = mapped_column(String(160), nullable=False)
     description: Mapped[str | None] = mapped_column(String(800), nullable=True)
+    daily_visit_limit: Mapped[int] = mapped_column(Integer, default=4, server_default="4", nullable=False)
     duration_days: Mapped[int] = mapped_column(Integer, nullable=False)
     price_cents: Mapped[int] = mapped_column(Integer, nullable=False)
     currency: Mapped[str] = mapped_column(String(3), default="USD", nullable=False)

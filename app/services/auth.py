@@ -5,6 +5,8 @@ from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.services.gym_access import require_active_gym
+
 from app.auth.jwt import create_token, decode_token
 from app.auth.passwords import hash_password, hash_token, verify_password, verify_token
 from app.core.config import get_settings
@@ -291,6 +293,7 @@ def register_existing_gym_user(db: Session, payload: GymUserRegistrationRequest)
 
     invitation_service.mark_consumed(db, invitation, user)
 
+    require_active_gym(db, user)
     tokens = _issue_tokens(user)
     user.refresh_token_hash = hash_token(tokens.refresh_token)
     db.commit()
@@ -342,6 +345,7 @@ def login(
         db.commit()
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is inactive.")
 
+    require_active_gym(db, user)
     tokens = _issue_tokens(user)
     user.refresh_token_hash = hash_token(tokens.refresh_token)
     _record_login(
@@ -367,6 +371,7 @@ def refresh(db: Session, payload: RefreshTokenRequest) -> TokenPair:
     if not verify_token(payload.refresh_token, user.refresh_token_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token is invalid.")
 
+    require_active_gym(db, user)
     tokens = _issue_tokens(user)
     user.refresh_token_hash = hash_token(tokens.refresh_token)
     db.commit()

@@ -38,3 +38,20 @@ class Attendance(TenantMixin, EnterpriseMixin, Base):
         if trainer is None or trainer.gym_id != self.gym_id:
             return None
         return trainer.full_name
+
+
+def daily_visit_limit(db, member):
+    from app.models.plans import MembershipPlan
+    plan = db.get(MembershipPlan, member.membership_plan_id) if member.membership_plan_id else None
+    return plan.daily_visit_limit if plan and plan.gym_id == member.gym_id else MAX_DAILY_VISITS
+
+
+def checkout_ready(record):
+    from datetime import UTC
+    return (datetime.now(UTC) - record.check_in_at.replace(tzinfo=UTC)).total_seconds() >= 1800
+
+
+def require_checkout_ready(record):
+    from fastapi import HTTPException
+    if not checkout_ready(record):
+        raise HTTPException(409, "Checkout becomes available 30 minutes after check-in.")

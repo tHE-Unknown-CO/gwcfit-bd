@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.auth.jwt import decode_token
 from app.database.session import get_db
 from app.models.user import User
+from app.services.gym_access import require_active_gym
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -37,4 +38,5 @@ def get_current_user(
     user = db.scalar(select(User).where(User.id == user_uuid, User.is_active.is_(True)))
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
+    require_active_gym(db, user)
     return user

@@ -46,6 +46,11 @@ class GymOption(BaseModel):
     name: str
 
 
+class GymGalleryPhoto(BaseModel):
+    url: str
+    caption: str | None = None
+
+
 class PublicGymDirectoryRead(BaseModel):
     id: UUID
     name: str
@@ -60,6 +65,7 @@ class PublicGymDirectoryRead(BaseModel):
     description: str | None
     facilities: list[str]
     categories: list[str]
+    gallery_photos: list[GymGalleryPhoto] = Field(default_factory=list)
     gender_policy: str | None
     opening_hours: dict
     starting_price_cents: int | None

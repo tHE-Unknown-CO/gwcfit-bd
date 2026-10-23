@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -67,7 +67,10 @@ def update_payment(
     current_user: User = Depends(require_permission(PermissionCode.MANAGE_PAYMENTS)),
 ):
     repo = TenantRepository(Payment, db, gym_id)
-    return repo.update(get_or_404(repo, payment_id, "Payment"), payload.model_dump(exclude_unset=True), actor_id=current_user.id)
+    payment = get_or_404(repo, payment_id, "Payment")
+    if (getattr(payment, "extra_data", None) or {}).get("source") == "member_checkout":
+        raise HTTPException(409, "Use the membership checkout verification flow for this payment.")
+    return repo.update(payment, payload.model_dump(exclude_unset=True), actor_id=current_user.id)
 
 
 @router.delete("/{payment_id}", response_model=MessageResponse)
@@ -78,5 +81,8 @@ def delete_payment(
     current_user: User = Depends(require_permission(PermissionCode.MANAGE_PAYMENTS)),
 ) -> MessageResponse:
     repo = TenantRepository(Payment, db, gym_id)
-    repo.deactivate(get_or_404(repo, payment_id, "Payment"), actor_id=current_user.id)
+    payment = get_or_404(repo, payment_id, "Payment")
+    if (getattr(payment, "extra_data", None) or {}).get("source") == "member_checkout":
+        raise HTTPException(409, "Checkout payments must be retained. Use the payment review flow instead.")
+    repo.deactivate(payment, actor_id=current_user.id)
     return MessageResponse(message="Payment was deactivated.")

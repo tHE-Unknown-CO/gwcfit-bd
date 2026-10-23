@@ -1,3 +1,5 @@
+from __future__ import annotations
+from app.models.attendance import daily_visit_limit, require_checkout_ready
 from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from jose import jwt
@@ -116,14 +118,14 @@ def scan_daily_attendance_qr(payload: AttendanceQrScan, db: Session = Depends(ge
     now = datetime.now(UTC)
     active = next((record for record in records if record.check_out_at is None), None)
     if active is not None:
-        if (now - active.check_in_at).total_seconds() < 10:
-            raise HTTPException(status_code=409, detail="Duplicate scan ignored. Please wait before scanning to check out.")
+        if (now - active.check_in_at).total_seconds() < 1800:
+            raise HTTPException(status_code=409, detail="Checkout becomes available 30 minutes after check-in.")
         active.check_out_at = now
         active.updated_by = current_user.id
         active.device_payload = {**(active.device_payload or {}), "checkout_actor": str(current_user.id)}
         attendance = active
-    elif len(records) >= MAX_DAILY_VISITS:
-        raise HTTPException(status_code=409, detail="Daily limit of 4 visits has been reached.")
+    elif len(records) >= daily_visit_limit(db, member):
+        raise HTTPException(status_code=409, detail="Your membership plan daily visit limit has been reached.")
     else:
         attendance = Attendance(gym_id=member.gym_id, member_id=member.id, trainer_id=member.trainer_id,
             check_in_at=now, source=AttendanceSource.QR_CODE.value, notes="Daily gym QR attendance",
@@ -179,8 +181,8 @@ def scan_attendance_qr(
     if action == "check_in":
         if active is not None:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Member is already checked in.")
-        if len(records) >= MAX_DAILY_VISITS:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Daily limit of 4 visits has been reached.")
+        if len(records) >= daily_visit_limit(db, member):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Your membership plan daily visit limit has been reached.")
         attendance = Attendance(
             gym_id=gym_id,
             member_id=member.id,
@@ -196,6 +198,7 @@ def scan_attendance_qr(
     else:
         if active is None:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No active check-in was found.")
+        require_checkout_ready(active)
         attendance = active
         attendance.check_out_at = datetime.now(UTC)
         attendance.source = AttendanceSource.QR_CODE.value
@@ -269,6 +272,8 @@ def create_attendance(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Attendance access is required.")
 
     check_in_at = payload.check_in_at.astimezone(UTC)
+    if payload.check_out_at is not None and (payload.check_out_at.astimezone(UTC) - check_in_at).total_seconds() < 1800:
+        raise HTTPException(409, "Checkout must be at least 30 minutes after check-in.")
     day_start = datetime.combine(check_in_at.date(), time.min, tzinfo=UTC)
     daily_visits = len(list(db.scalars(select(Attendance.id).where(
         Attendance.gym_id == gym_id,
@@ -277,8 +282,11 @@ def create_attendance(
         Attendance.check_in_at >= day_start,
         Attendance.check_in_at < day_start + timedelta(days=1),
     )).all()))
-    if daily_visits >= MAX_DAILY_VISITS:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Daily limit of 4 visits has been reached.")
+    member = db.scalar(select(Member).where(Member.id == payload.member_id, Member.gym_id == gym_id).with_for_update())
+    if member is None:
+        raise HTTPException(404, "Member not found")
+    if daily_visits >= daily_visit_limit(db, member):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Your membership plan daily visit limit has been reached.")
 
     if current_user.role == RoleName.TRAINER.value:
         trainer = _get_current_trainer(db, current_user)
@@ -323,6 +331,10 @@ def update_attendance(
 
     repo = TenantRepository(Attendance, db, gym_id)
     attendance = get_or_404(repo, attendance_id, "Attendance")
+    if payload.check_out_at is not None:
+        if (payload.check_out_at.astimezone(UTC) - attendance.check_in_at.replace(tzinfo=UTC)).total_seconds() < 1800:
+            raise HTTPException(409, "Checkout must be at least 30 minutes after check-in.")
+        require_checkout_ready(attendance)
     if current_user.role == RoleName.TRAINER.value:
         trainer = _get_current_trainer(db, current_user)
         if trainer is None or attendance.trainer_id != trainer.id:

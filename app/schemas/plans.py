@@ -11,6 +11,7 @@ from app.schemas.currency import normalize_currency_code
 class MembershipPlanCreate(BaseModel):
     name: str = Field(min_length=2, max_length=160)
     description: str | None = Field(default=None, max_length=800)
+    daily_visit_limit: int = Field(default=4, ge=1, le=24)
     duration_days: int = Field(gt=0)
     price_cents: int = Field(ge=0)
     currency: str = Field(default="USD", min_length=3, max_length=3)
@@ -25,6 +26,7 @@ class MembershipPlanCreate(BaseModel):
 class MembershipPlanUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=2, max_length=160)
     description: str | None = Field(default=None, max_length=800)
+    daily_visit_limit: int | None = Field(default=None, ge=1, le=24)
     duration_days: int | None = Field(default=None, gt=0)
     price_cents: int | None = Field(default=None, ge=0)
     currency: str | None = Field(default=None, min_length=3, max_length=3)
@@ -41,6 +43,7 @@ class MembershipPlanRead(EnterpriseRead):
     gym_name: str | None = None
     name: str
     description: str | None
+    daily_visit_limit: int
     duration_days: int
     price_cents: int
     currency: str

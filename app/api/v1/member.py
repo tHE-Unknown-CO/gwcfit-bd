@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.models.attendance import daily_visit_limit, checkout_ready, require_checkout_ready
 
 from datetime import UTC, date, datetime, time, timedelta, timezone
 from typing import Any
@@ -17,7 +18,7 @@ from app.models.enums import AttendanceSource
 from app.models.gym import Gym
 from app.models.member import Member
 from app.models.notification import Notification
-from app.models.plans import DietPlan, WorkoutPlan
+from app.models.plans import DietPlan, WorkoutPlan, MembershipPlan
 from app.models.trainer import Trainer
 from app.models.user import User
 from app.schemas.member_dashboard import (
@@ -33,6 +34,7 @@ from app.schemas.member_dashboard import (
     MemberGoalUpdate,
     MemberMealComplete,
     MemberMealPlanRead,
+    MemberAvailablePlan,
     MemberMembershipHistoryItem,
     MemberMembershipRead,
     MemberNotificationRead,
@@ -615,9 +617,9 @@ def get_member_membership(
         MemberMembershipHistoryItem(
             membership_uuid=payment.id,
             membership_plan_uuid=payment.membership_plan_id,
-            membership_plan_name=payment.membership_plan_name,
-            start_date=member.membership_starts_at,
-            expiry_date=member.membership_ends_at,
+            membership_plan_name=(payment.extra_data or {}).get("plan_name") or payment.membership_plan_name,
+            start_date=(payment.extra_data or {}).get("start_date") if (payment.extra_data or {}).get("source") == "member_checkout" else member.membership_starts_at,
+            expiry_date=(payment.extra_data or {}).get("expiry_date") if (payment.extra_data or {}).get("source") == "member_checkout" else member.membership_ends_at,
             status=str(payment.status),
             amount_cents=payment.amount_cents,
             currency=payment.currency,
@@ -643,6 +645,15 @@ def get_member_membership(
         days_remaining=days_left,
         renewal_reminder="Renew soon" if 0 < days_left <= 7 else "No reminder",
         benefits=plan.features if plan is not None and plan.gym_id == member.gym_id else [],
+        available_plans=[
+            MemberAvailablePlan(plan_uuid=item.id, name=item.name,
+                description=item.description, duration_days=item.duration_days,
+                price_cents=item.price_cents, currency=item.currency, benefits=item.features or [])
+            for item in db.scalars(select(MembershipPlan).where(
+                MembershipPlan.gym_id == member.gym_id,
+                MembershipPlan.is_active.is_(True),
+            ).order_by(MembershipPlan.price_cents, MembershipPlan.name, MembershipPlan.id)).all()
+        ],
         history=history,
     )
 
@@ -654,6 +665,31 @@ def get_member_payments(
 ) -> list[MemberPaymentRead]:
     member = _get_current_member(db, current_user)
     return [_payment_response(payment, member) for payment in _get_payments(db, member)]
+
+
+@router.get("/payments/{payment_id}/receipt")
+def get_member_receipt(payment_id: UUID, db: Session = Depends(get_db),
+    current_user: User = Depends(require_member)):
+    member = _get_current_member(db, current_user)
+    payment = db.scalar(select(Payment).where(Payment.id == payment_id,
+        Payment.member_id == member.id, Payment.gym_id == member.gym_id, Payment.is_active.is_(True)))
+    if payment is None:
+        raise HTTPException(404, "Payment not found")
+    if str(payment.status) != "paid":
+        raise HTTPException(409, "A receipt is available only after payment is confirmed by your gym.")
+    extra = _as_dict(payment.extra_data)
+    gym = db.scalar(select(Gym).where(Gym.id == member.gym_id))
+    return {
+        "receipt_number": "RCP-" + str(payment.id).upper(),
+        "payment_uuid": str(payment.id), "gym_name": gym.name if gym else member.gym_name or "Gym",
+        "gym_address": gym.address if gym else None, "gym_phone": gym.phone if gym else None,
+        "member_name": member.member_name, "member_code": member.member_code,
+        "plan_name": extra.get("plan_name") or payment.membership_plan_name or "Membership payment",
+        "amount_cents": payment.amount_cents, "currency": payment.currency,
+        "paid_at": payment.paid_at or payment.created_at, "payment_method": payment.method,
+        "transaction_reference": payment.provider_reference,
+        "start_date": extra.get("start_date"), "expiry_date": extra.get("expiry_date"),
+    }
 
 
 @router.get("/attendance", response_model=MemberAttendanceSummary)
@@ -676,9 +712,9 @@ def get_member_attendance(
     return MemberAttendanceSummary(
         today_status="checked_in" if today_record and not today_record.check_out_at else "not_checked_in",
         today_visit_count=today_visits,
-        daily_visit_limit=MAX_DAILY_VISITS,
-        can_check_in=(today_record is None or today_record.check_out_at is not None) and today_visits < MAX_DAILY_VISITS,
-        can_check_out=today_record is not None and today_record.check_out_at is None,
+        daily_visit_limit=daily_visit_limit(db, member),
+        can_check_in=(today_record is None or today_record.check_out_at is not None) and today_visits < daily_visit_limit(db, member),
+        can_check_out=today_record is not None and today_record.check_out_at is None and checkout_ready(today_record),
         monthly_attendance_count=monthly_count,
         attendance_percentage=min(percentage, 100.0),
         missed_days=max(elapsed_days - monthly_count, 0),
@@ -697,11 +733,13 @@ def create_member_attendance_qr_token(
     today_visits = _attendance_count_today(db, member)
     if action == "check_in" and today_record is not None and today_record.check_out_at is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Member is already checked in.")
-    if action == "check_in" and today_visits >= MAX_DAILY_VISITS:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Daily limit of 4 visits has been reached.")
+    if action == "check_in" and today_visits >= daily_visit_limit(db, member):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Your membership plan daily visit limit has been reached.")
     if action == "check_out" and (today_record is None or today_record.check_out_at is not None):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No active check-in was found.")
 
+    if action == "check_out":
+        require_checkout_ready(today_record)
     expires_in = 120
     token = create_token(
         subject=member.id,
@@ -723,8 +761,8 @@ def check_in_member(
     existing = _attendance_today(db, member)
     if existing and existing.check_out_at is None:
         return _attendance_response(existing, member)
-    if _attendance_count_today(db, member) >= MAX_DAILY_VISITS:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Daily limit of 4 visits has been reached.")
+    if _attendance_count_today(db, member) >= daily_visit_limit(db, member):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Your membership plan daily visit limit has been reached.")
 
     attendance = Attendance(
         gym_id=member.gym_id,
@@ -752,6 +790,7 @@ def check_out_member(
     attendance = _attendance_today(db, member)
     if attendance is None or attendance.check_out_at is not None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No active check-in was found.")
+    require_checkout_ready(attendance)
     attendance.check_out_at = _now()
     attendance.updated_by = current_user.id
     db.commit()

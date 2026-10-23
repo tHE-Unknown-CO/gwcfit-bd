@@ -1,4 +1,6 @@
 import logging
+import asyncio
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.exceptions import RequestValidationError
@@ -21,7 +23,43 @@ from app.middleware.request_size import RequestSizeLimitMiddleware
 settings = get_settings()
 logger = logging.getLogger("pulsefit.api")
 
+
+def suspend_expired_platform_gyms():
+    from datetime import UTC, datetime
+    from sqlalchemy import select, or_
+    from app.database.session import SessionLocal
+    from app.models.gym import Gym
+    from app.models.billing import Subscription
+    with SessionLocal() as db:
+        gyms = db.scalars(select(Gym).join(Subscription, Subscription.gym_id == Gym.id).where(
+            Gym.is_active.is_(True), Gym.status == "active",
+            or_(Subscription.status == "expired", Subscription.current_period_ends_at <= datetime.now(UTC)),
+        ).with_for_update(of=Gym)).all()
+        for gym in gyms:
+            gym.status = "suspended"
+            gym.settings = {**(gym.settings or {}), "suspension_reason": "platform_expired"}
+        db.commit()
+
+
+@asynccontextmanager
+async def lifespan(app):
+    async def monitor():
+        while True:
+            try:
+                await asyncio.to_thread(suspend_expired_platform_gyms)
+            except Exception:
+                logger.exception("Platform subscription expiry check failed")
+            await asyncio.sleep(60)
+    task = asyncio.create_task(monitor())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
 app = FastAPI(
+    lifespan=lifespan,
     title=settings.app_name,
     version="1.0.0",
     openapi_url=f"{settings.api_v1_prefix}/openapi.json",

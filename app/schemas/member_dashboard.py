@@ -55,6 +55,16 @@ class MemberMembershipHistoryItem(BaseModel):
     paid_at: datetime | None = None
 
 
+class MemberAvailablePlan(BaseModel):
+    plan_uuid: UUID
+    name: str
+    description: str | None = None
+    duration_days: int
+    price_cents: int
+    currency: str
+    benefits: list[str] = Field(default_factory=list)
+
+
 class MemberMembershipRead(BaseModel):
     membership_uuid: UUID
     member_uuid: UUID
@@ -72,6 +82,7 @@ class MemberMembershipRead(BaseModel):
     days_remaining: int
     renewal_reminder: str
     benefits: list[str]
+    available_plans: list[MemberAvailablePlan] = Field(default_factory=list)
     history: list[MemberMembershipHistoryItem]
 
 

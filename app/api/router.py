@@ -10,6 +10,7 @@ from app.api.v1 import (
     member,
     members,
     membership_plans,
+    membership_checkout,
     notifications,
     payments,
     platform_plans,
@@ -41,6 +42,7 @@ api_router.include_router(developer_portal.router)
 api_router.include_router(super_admin.router)
 api_router.include_router(gyms.router)
 api_router.include_router(member.router)
+api_router.include_router(membership_checkout.router)
 api_router.include_router(members.router)
 api_router.include_router(staff.router)
 api_router.include_router(trainers.router)
