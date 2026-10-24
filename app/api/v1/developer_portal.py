@@ -1,9 +1,10 @@
+import logging
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, or_, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.database.session import get_db
@@ -30,8 +31,10 @@ from app.schemas.developer_portal import (
 )
 from app.schemas.invitation import InvitationCreateRequest, InvitationCreated
 from app.services import invitations as invitation_service
+from app.services.platform_notifications import enqueue_gym_enquiry_notifications
 
 router = APIRouter(tags=["developer-portal"])
+logger = logging.getLogger(__name__)
 
 
 def _inquiry_read(
@@ -95,13 +98,27 @@ def create_gym_inquiry(payload: GymInquiryCreate, db: Session = Depends(get_db))
     )
     db.add(inquiry)
     try:
+        db.flush()
+        try:
+            # A savepoint preserves a valid enquiry if notification storage is
+            # unavailable. The periodic/history sync can recreate its alerts.
+            with db.begin_nested():
+                enqueue_gym_enquiry_notifications(db, inquiry)
+        except SQLAlchemyError:
+            logger.exception("Enquiry alert could not be queued; background sync will retry")
         db.commit()
-    except IntegrityError:
+    except IntegrityError as exc:
         db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="A gym or gym inquiry already exists with this email or mobile number.",
-        ) from None
+        constraint = getattr(getattr(exc.orig, "diag", None), "constraint_name", None)
+        if getattr(exc.orig, "sqlstate", None) == "23505" and constraint in {
+            "ix_gym_inquiries_email", "ix_gym_inquiries_phone",
+        }:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A gym or gym inquiry already exists with this email or mobile number.",
+            ) from None
+        logger.exception("Gym enquiry could not be saved")
+        raise HTTPException(status_code=503, detail="We could not save your enquiry right now. Please try again shortly.") from None
     db.refresh(inquiry)
     return _inquiry_read(db, inquiry)
 

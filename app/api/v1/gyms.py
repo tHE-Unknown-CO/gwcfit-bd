@@ -24,13 +24,33 @@ from app.utils.codes import generate_gym_code
 router = APIRouter(prefix="/gyms", tags=["gyms"])
 
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Literal
 from datetime import UTC, datetime, timedelta
 
 class GymActivation(BaseModel):
     platform_plan_id: UUID
     activation_type: Literal["paid", "free"]
+
+class GymPaymentGrace(BaseModel):
+    days: int = Field(ge=1, le=30)
+
+@router.post("/{gym_id}/payment-grace", response_model=GymRead)
+def grant_payment_grace(gym_id: UUID, payload: GymPaymentGrace, db: Session = Depends(get_db), actor: User = Depends(require_super_admin)):
+    gym = db.scalar(select(Gym).where(Gym.id == gym_id).with_for_update())
+    if gym is None:
+        raise HTTPException(404, "Gym was not found.")
+    subscription = db.scalar(select(Subscription).where(Subscription.gym_id == gym_id))
+    if subscription is None or subscription.platform_plan_id is None:
+        raise HTTPException(422, "Assign a Platform Membership Plan before granting payment time.")
+    now = datetime.now(UTC)
+    gym.is_active = True
+    gym.status = "active"
+    gym.settings = {**(gym.settings or {}), "suspension_reason": None, "payment_grace_started_at": now.isoformat(), "payment_grace_ends_at": (now + timedelta(days=payload.days)).isoformat(), "payment_grace_days": payload.days, "payment_grace_by": str(actor.id)}
+    gym.updated_by = actor.id
+    db.commit()
+    db.refresh(gym)
+    return gym
 
 @router.post("/{gym_id}/reactivate", response_model=GymRead)
 def reactivate_gym(gym_id: UUID, payload: GymActivation, db: Session = Depends(get_db), current_user: User = Depends(require_super_admin)):
@@ -59,7 +79,7 @@ def reactivate_gym(gym_id: UUID, payload: GymActivation, db: Session = Depends(g
     subscription.updated_by = current_user.id
     gym.is_active = True
     gym.status = "active"
-    gym.settings = {k: v for k, v in (gym.settings or {}).items() if k not in {"suspension_reason", "platform_access_override", "platform_access_override_by"}}
+    gym.settings = {k: v for k, v in (gym.settings or {}).items() if k not in {"suspension_reason", "platform_access_override", "platform_access_override_by", "payment_grace_started_at", "payment_grace_ends_at", "payment_grace_days", "payment_grace_by"}}
     gym.settings = {**gym.settings, "platform_activation_type": payload.activation_type, "platform_activation_plan": plan.name, "platform_activation_by": str(current_user.id), "platform_activation_at": now.isoformat()}
     gym.updated_by = current_user.id
     db.commit()
@@ -117,6 +137,7 @@ def list_public_gym_directory(
             facilities=profile.get("facilities", []),
             categories=profile.get("categories", []),
             gallery_photos=profile.get("gallery_photos", []),
+            hero_photos=profile.get("hero_photos", []),
             gender_policy=profile.get("gender_policy"),
             opening_hours=profile.get("opening_hours", {}),
             starting_price_cents=profile.get("starting_price_cents"),
@@ -208,7 +229,7 @@ def update_my_gym(
     for key, value in payload.model_dump(exclude_unset=True).items():
         if key == "settings" and current_user.role != "super_admin":
             reserved = {"platform_access_override", "platform_access_override_by", "suspension_reason", "platform_activation_type", "platform_activation_plan", "platform_activation_by", "platform_activation_at"}
-            value = {**{k: v for k, v in (value or {}).items() if k not in reserved}, **{k: v for k, v in (gym.settings or {}).items() if k in reserved}}
+            value = {**{k: v for k, v in (value or {}).items() if k not in reserved and not k.startswith("payment_grace_")}, **{k: v for k, v in (gym.settings or {}).items() if k in reserved or k.startswith("payment_grace_")}}
         setattr(gym, key, value)
     gym.updated_by = current_user.id
     db.commit()

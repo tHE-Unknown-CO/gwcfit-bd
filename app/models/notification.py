@@ -11,6 +11,8 @@ from app.models.base import Base, EnterpriseMixin, TenantMixin
 class Notification(TenantMixin, EnterpriseMixin, Base):
     __tablename__ = "notifications"
 
+    gym_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("gyms.id", ondelete="CASCADE"), nullable=True, index=True)
+
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     title: Mapped[str] = mapped_column(String(180), nullable=False)
     body: Mapped[str] = mapped_column(String(1200), nullable=False)

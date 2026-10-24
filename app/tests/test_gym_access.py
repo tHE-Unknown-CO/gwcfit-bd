@@ -45,3 +45,15 @@ def test_unpaid_suspension_messages():
         with pytest.raises(HTTPException) as error:
             require_active_gym(db, SimpleNamespace(role=role, gym_id="gym"))
         assert message in error.value.detail
+
+
+def test_grace_allows_access_until_deadline_then_suspends():
+    from datetime import UTC, datetime, timedelta
+    from app.services.gym_access import platform_expired
+    gym = SimpleNamespace(status="active", is_active=True, settings={"payment_grace_ends_at": (datetime.now(UTC) + timedelta(days=7)).isoformat()})
+    db = SimpleNamespace(commit=lambda: None)
+    assert platform_expired(db, gym) is False
+    gym.settings["payment_grace_ends_at"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    assert platform_expired(db, gym) is True
+    assert gym.status == "suspended"
+    assert gym.settings["suspension_reason"] == "platform_unpaid"

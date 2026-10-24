@@ -66,6 +66,7 @@ class PublicGymDirectoryRead(BaseModel):
     facilities: list[str]
     categories: list[str]
     gallery_photos: list[GymGalleryPhoto] = Field(default_factory=list)
+    hero_photos: list[GymGalleryPhoto] = Field(default_factory=list)
     gender_policy: str | None
     opening_hours: dict
     starting_price_cents: int | None

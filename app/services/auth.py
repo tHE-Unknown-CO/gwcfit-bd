@@ -379,6 +379,7 @@ def refresh(db: Session, payload: RefreshTokenRequest) -> TokenPair:
 
 
 def logout(db: Session, user: User) -> None:
+    user.profile = {**(user.profile or {}), "push_tokens": []}
     user.refresh_token_hash = None
     db.commit()
 

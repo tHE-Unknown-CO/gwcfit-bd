@@ -68,6 +68,10 @@ class FakeSession:
         for record in self.added:
             self._apply_defaults(record)
 
+    @contextmanager
+    def begin_nested(self):
+        yield
+
     def commit(self):
         self.flush()
         self.committed = True
@@ -945,6 +949,54 @@ def test_owner_site_rejects_reused_inquiry_email():
     assert response.status_code == 409
     assert "already exists" in response.json()["detail"]
     assert db.added == []
+
+
+def test_notification_integrity_failure_does_not_reject_new_enquiry(monkeypatch):
+    from sqlalchemy.exc import IntegrityError
+    from app.api.v1 import developer_portal
+    from app.schemas.developer_portal import GymInquiryCreate
+    def fail(*args):
+        raise IntegrityError("insert notifications", {}, Exception("notification constraint failed"))
+    monkeypatch.setattr(developer_portal, "enqueue_gym_enquiry_notifications", fail)
+    db = FakeSession()
+    result = developer_portal.create_gym_inquiry(GymInquiryCreate(
+        full_name="New Owner", email="unused@example.com", phone="9876543210",
+        gym_name="New gym", active_members_range="Under 100",
+    ), db)
+    assert result.status == "new"
+    assert db.committed is True
+    assert db.rolled_back is False
+
+
+def test_only_contact_unique_violations_report_duplicate_enquiry():
+    from sqlalchemy.exc import IntegrityError
+    from fastapi import HTTPException
+    from app.api.v1.developer_portal import create_gym_inquiry
+    from app.schemas.developer_portal import GymInquiryCreate
+    payload = GymInquiryCreate(full_name="New Owner", email="unused@example.com", phone="9876543210",
+                               gym_name="New gym", active_members_range="Under 100")
+    for sqlstate, constraint, expected in [
+        ("23505", "ix_gym_inquiries_email", 409),
+        ("23505", "ix_gym_inquiries_phone", 409),
+        ("23505", "gym_inquiries_pkey", 503),
+        ("23502", None, 503),
+        ("23503", "gym_inquiries_interested_plan_id_fkey", 503),
+    ]:
+        class FailedSession(FakeSession):
+            def flush(self):
+                error = Exception("database constraint failed")
+                error.sqlstate = sqlstate
+                error.diag = SimpleNamespace(constraint_name=constraint)
+                raise IntegrityError("insert enquiry", {}, error)
+        db = FailedSession()
+        try:
+            create_gym_inquiry(payload, db)
+            raise AssertionError("Expected the save error to be reported")
+        except HTTPException as exc:
+            assert exc.status_code == expected
+            if expected == 503:
+                assert "already exists" not in exc.detail
+        assert db.rolled_back is True
 
 
 def test_owner_site_rejects_mobile_number_used_by_existing_user():

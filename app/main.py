@@ -31,18 +31,31 @@ def suspend_expired_platform_gyms():
     from app.models.gym import Gym
     from app.models.billing import Subscription
     with SessionLocal() as db:
-        gyms = db.scalars(select(Gym).join(Subscription, Subscription.gym_id == Gym.id).where(
-            Gym.is_active.is_(True), Gym.status == "active",
-            or_(Subscription.status == "expired", Subscription.current_period_ends_at <= datetime.now(UTC)),
-        ).with_for_update(of=Gym)).all()
+        from app.services.gym_access import platform_expired
+        gyms = db.scalars(select(Gym).where(Gym.is_active.is_(True), Gym.status == "active")).all()
         for gym in gyms:
-            gym.status = "suspended"
-            gym.settings = {**(gym.settings or {}), "suspension_reason": "platform_expired"}
-        db.commit()
+            platform_expired(db, gym)
+
+
+def refresh_platform_notifications():
+    from app.database.session import SessionLocal
+    from app.services.platform_notifications import sync_platform_notifications
+    with SessionLocal() as db:
+        sync_platform_notifications(db)
+
+
+def process_mobile_notifications():
+    from app.database.session import SessionLocal
+    from app.services.platform_notifications import deliver_mobile_push
+    with SessionLocal() as db:
+        deliver_mobile_push(db)
 
 
 @asynccontextmanager
 async def lifespan(app):
+    from app.services.notification_realtime import NotificationHub
+    hub = NotificationHub()
+    app.state.notification_hub = hub
     async def monitor():
         while True:
             try:
@@ -50,13 +63,33 @@ async def lifespan(app):
             except Exception:
                 logger.exception("Platform subscription expiry check failed")
             await asyncio.sleep(60)
-    task = asyncio.create_task(monitor())
+
+    async def worker(event, operation, fallback):
+        while True:
+            event.clear()
+            try:
+                await asyncio.to_thread(operation)
+            except Exception:
+                logger.exception("Notification worker failed; will retry")
+            try:
+                await asyncio.wait_for(event.wait(), timeout=fallback)
+            except TimeoutError:
+                pass
+
+    listener = asyncio.create_task(asyncio.to_thread(hub.listen, asyncio.get_running_loop()))
+    tasks = [asyncio.create_task(monitor()),
+             asyncio.create_task(worker(hub.sync_needed, refresh_platform_notifications, 30)),
+             asyncio.create_task(worker(hub.push_needed, process_mobile_notifications, 5))]
     try:
         yield
     finally:
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
+        hub.stop.set()
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with suppress(asyncio.CancelledError):
+                await task
+        await listener
 
 app = FastAPI(
     lifespan=lifespan,
@@ -69,15 +102,16 @@ app.add_middleware(GZipMiddleware, minimum_size=1_000)
 app.add_middleware(InMemoryRateLimitMiddleware)
 app.add_middleware(RequestSizeLimitMiddleware)
 app.add_middleware(RequestMetricsMiddleware)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.cors_origins,
-    allow_origin_regex=settings.cors_origin_regex,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Accept", "Authorization", "Content-Type", "Idempotency-Key", "X-Request-ID"],
-    expose_headers=["Location", "Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-Request-ID"],
-)
+cors_options = {
+    "allow_origins": settings.cors_origins,
+    "allow_origin_regex": settings.cors_origin_regex,
+    "allow_credentials": True,
+    "allow_methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    "allow_headers": ["Accept", "Authorization", "Content-Type", "Idempotency-Key", "X-Request-ID"],
+    "expose_headers": ["Location", "Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-Request-ID"],
+}
+cors_policy = CORSMiddleware(app, **cors_options)
+app.add_middleware(CORSMiddleware, **cors_options)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RequestContextMiddleware)
 
@@ -144,7 +178,15 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 async def unhandled_exception_handler(request: Request, exc: Exception):
     request_id = get_request_id(request)
     logger.exception("Unhandled API error request_id=%s", request_id, exc_info=exc)
-    return _error_response(request, 500, "An unexpected error occurred.")
+    response = _error_response(request, 500, "An unexpected error occurred.")
+    # ServerErrorMiddleware creates this response outside CORSMiddleware.
+    # Apply the same origin policy so browsers can read the actual API error.
+    origin = request.headers.get("origin")
+    if origin and cors_policy.is_allowed_origin(origin):
+        response.headers.update(cors_policy.simple_headers)
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers.add_vary_header("Origin")
+    return response
 
 
 @app.get("/health", tags=["system"])

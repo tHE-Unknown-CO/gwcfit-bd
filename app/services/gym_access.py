@@ -7,6 +7,16 @@ from datetime import UTC, datetime
 
 
 def platform_expired(db, gym):
+    grace_end = (getattr(gym, "settings", None) or {}).get("payment_grace_ends_at")
+    if grace_end:
+        end = datetime.fromisoformat(grace_end)
+        if end > datetime.now(UTC):
+            return False
+        if gym.is_active and gym.status == "active":
+            gym.status = "suspended"
+            gym.settings = {**gym.settings, "suspension_reason": "platform_unpaid"}
+            db.commit()
+        return True
     subscription = db.scalar(select(Subscription).where(Subscription.gym_id == gym.id))
     if subscription is None:
         return False

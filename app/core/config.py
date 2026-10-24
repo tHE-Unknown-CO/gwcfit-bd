@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     public_write_rate_limit_per_minute: int = Field(default=30, gt=0)
     max_request_body_bytes: int = Field(default=1_048_576, ge=16_384, le=10_485_760)
     storage_provider: str = "s3"
+    expo_push_access_token: str | None = None
     s3_bucket_name: str | None = None
     cloudinary_cloud_name: str | None = None
 
