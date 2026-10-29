@@ -34,7 +34,9 @@ ROLE_PERMISSIONS: dict[RoleName, set[PermissionCode]] = {
     RoleName.RECEPTIONIST: {
         PermissionCode.MANAGE_ATTENDANCE,
         PermissionCode.MANAGE_MEMBERS,
+        PermissionCode.MANAGE_MEMBERSHIP_PLANS,
         PermissionCode.MANAGE_PAYMENTS,
+        PermissionCode.MANAGE_TRAINERS,
         PermissionCode.VIEW_OWN_PROFILE,
     },
     RoleName.MEMBER: {PermissionCode.VIEW_OWN_PROFILE},

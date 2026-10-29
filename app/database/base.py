@@ -14,6 +14,8 @@ from app.models import (  # noqa: F401
     RolePermission,
     Subscription,
     Trainer,
+    TrainerFeedback,
+    TrainerFeedback,
     User,
     UserPermission,
     WorkoutPlan,

@@ -16,7 +16,11 @@ def test_trainer_cannot_manage_payments_by_default():
     assert not has_permission(user(RoleName.TRAINER), PermissionCode.MANAGE_PAYMENTS)
 
 
-def test_receptionist_can_collect_payments():
+def test_receptionist_can_manage_front_desk_plans_trainers_and_payments():
+    assert has_permission(user(RoleName.RECEPTIONIST), PermissionCode.MANAGE_TRAINERS)
+    assert has_permission(
+        user(RoleName.RECEPTIONIST), PermissionCode.MANAGE_MEMBERSHIP_PLANS
+    )
     assert has_permission(user(RoleName.RECEPTIONIST), PermissionCode.MANAGE_PAYMENTS)
 
 

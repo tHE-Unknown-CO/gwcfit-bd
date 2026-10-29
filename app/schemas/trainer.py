@@ -42,3 +42,5 @@ class TrainerRead(EnterpriseRead):
     hourly_rate_cents: int
     commission_rate: float
     extra_data: dict
+    average_rating: float = 0
+    total_reviews: int = 0

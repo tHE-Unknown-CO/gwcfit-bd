@@ -7,6 +7,7 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database.session import get_db
@@ -20,6 +21,7 @@ from app.models.member import Member
 from app.models.notification import Notification
 from app.models.plans import DietPlan, WorkoutPlan, MembershipPlan
 from app.models.trainer import Trainer
+from app.models.trainer_feedback import TrainerFeedback
 from app.models.user import User
 from app.schemas.member_dashboard import (
     JsonDict,
@@ -45,11 +47,13 @@ from app.schemas.member_dashboard import (
     MemberProgressLogRead,
     MemberRewardRead,
     MemberTrainerRead,
+    
     MemberWorkoutComplete,
     MemberWorkoutRead,
     SupportTicketCreate,
     SupportTicketRead,
 )
+from app.schemas.trainer_feedback import MemberTrainerFeedbackRead, TrainerFeedbackUpsert
 from app.services.auth import _ensure_member_profile_for_user
 
 from app.services.member_activity import activity_day, merge_activity, snapshot_today, record_calorie_target
@@ -965,6 +969,66 @@ def get_member_trainer(
         assigned_meal_plans=[plan.title for plan in meals],
         trainer_notes=trainer_extra.get("notes") or trainer.bio,
     )
+
+
+def _feedback_response(record: TrainerFeedback) -> MemberTrainerFeedbackRead:
+    return MemberTrainerFeedbackRead(
+        id=record.id, trainer_id=record.trainer_id, review_month=record.review_month,
+        rating=record.rating, feedback_option=record.feedback_option, feedback_text=record.feedback_text,
+        created_at=record.created_at, updated_at=record.updated_at,
+    )
+
+
+@router.get("/trainer/feedback", response_model=MemberTrainerFeedbackRead | None)
+def get_member_trainer_feedback(
+    db: Session = Depends(get_db), current_user: User = Depends(require_member),
+) -> MemberTrainerFeedbackRead | None:
+    member = _get_current_member(db, current_user)
+    if member.trainer_id is None:
+        return None
+    month = _today().replace(day=1)
+    record = db.scalar(select(TrainerFeedback).where(
+        TrainerFeedback.gym_id == member.gym_id, TrainerFeedback.member_id == member.id,
+        TrainerFeedback.trainer_id == member.trainer_id, TrainerFeedback.review_month == month,
+        TrainerFeedback.is_active.is_(True),
+    ))
+    return _feedback_response(record) if record else None
+
+
+@router.put("/trainer/feedback", response_model=MemberTrainerFeedbackRead)
+def upsert_member_trainer_feedback(
+    payload: TrainerFeedbackUpsert,
+    db: Session = Depends(get_db), current_user: User = Depends(require_member),
+) -> MemberTrainerFeedbackRead:
+    member = _get_current_member(db, current_user, lock=True)
+    if member.trainer_id is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have an assigned trainer.")
+    trainer = db.scalar(select(Trainer.id).where(
+        Trainer.id == member.trainer_id, Trainer.gym_id == member.gym_id, Trainer.is_active.is_(True),
+    ))
+    if trainer is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Your assigned trainer is unavailable.")
+    month = _today().replace(day=1)
+    record = db.scalar(select(TrainerFeedback).where(
+        TrainerFeedback.gym_id == member.gym_id, TrainerFeedback.member_id == member.id,
+        TrainerFeedback.trainer_id == member.trainer_id, TrainerFeedback.review_month == month,
+    ).with_for_update())
+    values = payload.model_dump()
+    if record is None:
+        record = TrainerFeedback(gym_id=member.gym_id, member_id=member.id, trainer_id=member.trainer_id,
+                                 review_month=month, created_by=current_user.id, updated_by=current_user.id, **values)
+        db.add(record)
+    else:
+        for key, value in values.items():
+            setattr(record, key, value)
+        record.updated_by = current_user.id
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A review already exists for this trainer this month.") from exc
+    db.refresh(record)
+    return _feedback_response(record)
 
 
 @router.get("/classes", response_model=list[MemberClassRead])
