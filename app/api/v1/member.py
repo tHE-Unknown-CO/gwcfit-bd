@@ -22,6 +22,7 @@ from app.models.notification import Notification
 from app.models.plans import DietPlan, WorkoutPlan, MembershipPlan
 from app.models.trainer import Trainer
 from app.models.trainer_feedback import TrainerFeedback
+from app.models.gym_feedback import GymFeedback
 from app.models.user import User
 from app.schemas.member_dashboard import (
     JsonDict,
@@ -54,6 +55,7 @@ from app.schemas.member_dashboard import (
     SupportTicketRead,
 )
 from app.schemas.trainer_feedback import MemberTrainerFeedbackRead, TrainerFeedbackUpsert
+from app.schemas.gym_feedback import MemberGymFeedbackRead, GymFeedbackUpsert
 from app.services.auth import _ensure_member_profile_for_user
 
 from app.services.member_activity import activity_day, merge_activity, snapshot_today, record_calorie_target
@@ -1029,6 +1031,53 @@ def upsert_member_trainer_feedback(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A review already exists for this trainer this month.") from exc
     db.refresh(record)
     return _feedback_response(record)
+
+
+def _gym_feedback_response(record: GymFeedback) -> MemberGymFeedbackRead:
+    return MemberGymFeedbackRead(
+        id=record.id, review_month=record.review_month, rating=record.rating,
+        feedback_text=record.feedback_text, created_at=record.created_at, updated_at=record.updated_at,
+    )
+
+
+@router.get("/gym/feedback", response_model=MemberGymFeedbackRead | None)
+def get_member_gym_feedback(
+    db: Session = Depends(get_db), current_user: User = Depends(require_member),
+) -> MemberGymFeedbackRead | None:
+    member = _get_current_member(db, current_user)
+    month = _today().replace(day=1)
+    record = db.scalar(select(GymFeedback).where(
+        GymFeedback.gym_id == member.gym_id, GymFeedback.member_id == member.id,
+        GymFeedback.review_month == month, GymFeedback.is_active.is_(True),
+    ))
+    return _gym_feedback_response(record) if record else None
+
+
+@router.put("/gym/feedback", response_model=MemberGymFeedbackRead)
+def upsert_member_gym_feedback(
+    payload: GymFeedbackUpsert, db: Session = Depends(get_db), current_user: User = Depends(require_member),
+) -> MemberGymFeedbackRead:
+    member = _get_current_member(db, current_user, lock=True)
+    month = _today().replace(day=1)
+    record = db.scalar(select(GymFeedback).where(
+        GymFeedback.gym_id == member.gym_id, GymFeedback.member_id == member.id,
+        GymFeedback.review_month == month,
+    ))
+    if record is None:
+        record = GymFeedback(gym_id=member.gym_id, member_id=member.id, review_month=month,
+                             rating=payload.rating, feedback_text=payload.feedback_text, created_by=current_user.id)
+        db.add(record)
+    else:
+        record.rating = payload.rating
+        record.feedback_text = payload.feedback_text
+        record.updated_by = current_user.id
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A gym review already exists for this month.") from exc
+    db.refresh(record)
+    return _gym_feedback_response(record)
 
 
 @router.get("/classes", response_model=list[MemberClassRead])

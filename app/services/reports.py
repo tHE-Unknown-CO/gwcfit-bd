@@ -12,6 +12,8 @@ from app.models.gym import Gym
 from app.models.user import User
 from app.models.member import Member
 from app.models.trainer import Trainer
+from app.models.gym_feedback import GymFeedback
+from app.schemas.gym_feedback import GymFeedbackReview, GymFeedbackSummary
 from app.schemas.reports import DashboardStats, PlatformGymPoint, PlatformReport, PlatformRevenuePoint
 
 
@@ -47,6 +49,27 @@ def get_dashboard_stats(db: Session, gym_id: UUID) -> DashboardStats:
         trainers=trainers,
         checkins_today=checkins_today,
         revenue_cents_this_month=revenue_cents_this_month,
+    )
+
+
+def get_gym_feedback_summary(db: Session, gym_id: UUID) -> GymFeedbackSummary:
+    rows = list(db.scalars(select(GymFeedback).where(
+        GymFeedback.gym_id == gym_id, GymFeedback.is_active.is_(True),
+    ).order_by(GymFeedback.updated_at.desc()).limit(200)).all())
+    distribution = {star: 0 for star in range(1, 6)}
+    for row in rows:
+        distribution[row.rating] += 1
+    members = {member.id: member.member_name for member in db.scalars(select(Member).where(
+        Member.gym_id == gym_id, Member.id.in_([row.member_id for row in rows]),
+    )).all()} if rows else {}
+    reviews = [GymFeedbackReview(
+        id=row.id, member_id=row.member_id, member_name=members.get(row.member_id, "Former member"),
+        review_month=row.review_month, rating=row.rating, feedback_text=row.feedback_text,
+        created_at=row.created_at, updated_at=row.updated_at,
+    ) for row in rows]
+    return GymFeedbackSummary(
+        average_rating=round(sum(row.rating for row in rows) / len(rows), 1) if rows else 0,
+        total_reviews=len(rows), star_distribution=distribution, reviews=reviews,
     )
 
 

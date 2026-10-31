@@ -15,7 +15,7 @@ from app.models import (  # noqa: F401
     Subscription,
     Trainer,
     TrainerFeedback,
-    TrainerFeedback,
+    GymFeedback,
     User,
     UserPermission,
     WorkoutPlan,

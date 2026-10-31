@@ -11,6 +11,7 @@ from app.models.platform_plan import PlatformPlan
 from app.models.plans import DietPlan, MembershipPlan, WorkoutPlan
 from app.models.trainer import Trainer
 from app.models.trainer_feedback import TrainerFeedback
+from app.models.gym_feedback import GymFeedback
 from app.models.user import Permission, Role, RolePermission, User, UserPermission
 from app.models.attendance import Attendance
 
@@ -35,6 +36,7 @@ __all__ = [
     "Subscription",
     "Trainer",
     "TrainerFeedback",
+    "GymFeedback",
     "User",
     "UserPermission",
     "WorkoutPlan",
